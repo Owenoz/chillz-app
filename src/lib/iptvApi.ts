@@ -1,6 +1,7 @@
 // ── IPTV-org Live Channel Fetcher ─────────────────────────────
-// Fetches M3U playlists from https://iptv-org.github.io/iptv/
-// and parses them into our TvChannel-compatible shape.
+// Primary: Nexonic IPTV (https://github.com/Shahrukhalid/nexonic-iptv)
+//   — verified streams checked 3x/day, 4,325 working channels
+// Fallback: iptv-org (https://github.com/iptv-org/iptv)
 
 export interface IptvChannel {
   id: string
@@ -18,7 +19,7 @@ export interface IptvChannel {
   quality: string
 }
 
-// Country playlists we want to load — ordered by priority
+// Country playlists — ordered by priority
 export const IPTV_COUNTRY_PLAYLISTS: { code: string; name: string; flag: string; order: number }[] = [
   { code: 'ug', name: 'Uganda',        flag: '🇺🇬', order: 1 },
   { code: 'ke', name: 'Kenya',         flag: '🇰🇪', order: 2 },
@@ -28,11 +29,11 @@ export const IPTV_COUNTRY_PLAYLISTS: { code: string; name: string; flag: string;
   { code: 'gh', name: 'Ghana',         flag: '🇬🇭', order: 6 },
   { code: 'za', name: 'South Africa',  flag: '🇿🇦', order: 7 },
   { code: 'et', name: 'Ethiopia',      flag: '🇪🇹', order: 8 },
-  { code: 'gb', name: 'UK',            flag: '🇬🇧', order: 9 },
+  { code: 'uk', name: 'UK',            flag: '🇬🇧', order: 9 },  // nexonic uses 'uk' not 'gb'
   { code: 'us', name: 'USA',           flag: '🇺🇸', order: 10 },
   { code: 'fr', name: 'France',        flag: '🇫🇷', order: 11 },
   { code: 'de', name: 'Germany',       flag: '🇩🇪', order: 12 },
-  { code: 'ae', name: 'Arab World',    flag: '🌍', order: 13 },
+  { code: 'ae', name: 'Arab World',    flag: '🌍',  order: 13 },
   { code: 'in', name: 'India',         flag: '🇮🇳', order: 14 },
 ]
 
@@ -47,7 +48,17 @@ export const IPTV_CATEGORY_PLAYLISTS: { key: string; label: string; color: strin
   { key: 'documentary',   label: 'Documentary',   color: '#14b8a6' },
 ]
 
-const BASE = 'https://iptv-org.github.io/iptv'
+// ── Nexonic IPTV — primary source (verified, 4325 working channels) ──
+const NEXONIC_BASE = 'https://shahrukhalid.github.io/nexonic-iptv/playlists'
+
+// ── iptv-org — fallback source ──
+const IPTV_ORG_BASE = 'https://iptv-org.github.io/iptv'
+
+// CDN mirrors for iptv-org as extra fallback
+const IPTV_ORG_MIRRORS = [
+  'https://cdn.jsdelivr.net/gh/iptv-org/iptv@gh-pages',
+  'https://cdn.statically.io/gh/iptv-org/iptv/gh-pages',
+]
 
 /** Extract quality label from title e.g. "(720p)" → "720p" */
 function extractQuality(title: string): string {
@@ -55,12 +66,13 @@ function extractQuality(title: string): string {
   return m ? m[1] : ''
 }
 
-/** Sanitise title by removing quality tags and "[Not 24/7]" / "[Geo-blocked]" labels */
+/** Sanitise title */
 function cleanTitle(title: string): string {
   return title
     .replace(/\s*\(\d+p\)/g, '')
     .replace(/\s*\[Not 24\/7\]/g, '')
     .replace(/\s*\[Geo-blocked\]/g, '')
+    .replace(/\s*x-tier=\S+/g, '')
     .trim()
 }
 
@@ -73,18 +85,16 @@ export function parseM3U(text: string, countryName: string | null, countryCode: 
   while (i < lines.length) {
     const line = lines[i].trim()
     if (line.startsWith('#EXTINF')) {
-      const logoMatch   = line.match(/tvg-logo="([^"]*)"/)
-      const groupMatch  = line.match(/group-title="([^"]*)"/)
-      const titleMatch  = line.match(/,(.+)$/)
+      const logoMatch  = line.match(/tvg-logo="([^"]*)"/)
+      const groupMatch = line.match(/group-title="([^"]*)"/)
+      const titleMatch = line.match(/,(.+)$/)
 
       const rawTitle = titleMatch ? titleMatch[1].trim() : 'Unknown Channel'
-      const logo     = logoMatch  ? logoMatch[1]        : ''
+      const logo     = logoMatch  ? logoMatch[1] : ''
       const group    = groupMatch ? groupMatch[1].split(';')[0].trim() : 'General'
 
-      // Skip lines without a URL following
       let url = ''
       let j = i + 1
-      // Skip any EXTVLCOPT lines
       while (j < lines.length && lines[j].trim().startsWith('#')) j++
       if (j < lines.length) {
         const candidate = lines[j].trim()
@@ -92,7 +102,7 @@ export function parseM3U(text: string, countryName: string | null, countryCode: 
       }
 
       if (url) {
-        const id = `iptv-${countryCode || 'intl'}-${channels.length}-${Date.now()}`
+        const id = `iptv-${countryCode || 'intl'}-${channels.length}-${orderBase}`
         channels.push({
           id,
           title:        cleanTitle(rawTitle),
@@ -135,31 +145,49 @@ async function fetchM3U(url: string): Promise<string> {
   }
 }
 
-/** Fetch all channels for a country code */
+/** Fetch country channels — tries Nexonic first, falls back to iptv-org + CDN mirrors */
 export async function fetchCountryChannels(code: string, name: string, orderBase: number): Promise<IptvChannel[]> {
-  try {
-    const text = await fetchM3U(`${BASE}/countries/${code}.m3u`)
-    return parseM3U(text, name, code, orderBase)
-  } catch {
-    return []
+  // Nexonic uses 'uk' for UK, iptv-org uses 'gb'
+  const nexonicCode = code
+  const iptvOrgCode = code === 'uk' ? 'gb' : code
+
+  const urls = [
+    `${NEXONIC_BASE}/countries/${nexonicCode}.m3u`,
+    `${IPTV_ORG_BASE}/countries/${iptvOrgCode}.m3u`,
+    ...IPTV_ORG_MIRRORS.map(m => `${m}/countries/${iptvOrgCode}.m3u`),
+  ]
+
+  for (const url of urls) {
+    try {
+      const text = await fetchM3U(url)
+      const channels = parseM3U(text, name, code, orderBase)
+      if (channels.length > 0) return channels
+    } catch { /* try next */ }
   }
+  return []
 }
 
-/** Fetch all channels for a category key */
+/** Fetch category channels — tries iptv-org, then CDN mirrors */
 export async function fetchCategoryChannels(key: string, orderBase: number): Promise<IptvChannel[]> {
-  try {
-    const text = await fetchM3U(`${BASE}/categories/${key}.m3u`)
-    return parseM3U(text, null, null, orderBase)
-  } catch {
-    return []
+  const urls = [
+    `${IPTV_ORG_BASE}/categories/${key}.m3u`,
+    `${NEXONIC_BASE}/categories/${key}.m3u`,
+    ...IPTV_ORG_MIRRORS.map(m => `${m}/categories/${key}.m3u`),
+  ]
+
+  for (const url of urls) {
+    try {
+      const text = await fetchM3U(url)
+      const channels = parseM3U(text, null, null, orderBase)
+      if (channels.length > 0) return channels
+    } catch { /* try next */ }
   }
+  return []
 }
 
-/** Load all country playlists in order, returning channels grouped by country */
+/** Load all country playlists in batches */
 export async function fetchAllCountryChannels(): Promise<Map<string, IptvChannel[]>> {
   const result = new Map<string, IptvChannel[]>()
-
-  // Load in batches of 3 to avoid overloading
   const BATCH = 3
   for (let i = 0; i < IPTV_COUNTRY_PLAYLISTS.length; i += BATCH) {
     const batch = IPTV_COUNTRY_PLAYLISTS.slice(i, i + BATCH)
@@ -172,6 +200,5 @@ export async function fetchAllCountryChannels(): Promise<Map<string, IptvChannel
       }
     })
   }
-
   return result
 }
