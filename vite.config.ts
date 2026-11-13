@@ -2,25 +2,35 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
-// Polyfill globalThis.crypto for Node 18 (required by workbox-build → serialize-javascript)
-import { webcrypto } from 'node:crypto'
-if (!globalThis.crypto) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(globalThis as any).crypto = webcrypto
-}
-
 export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      // injectManifest = we supply our own sw.ts; plugin only injects the precache list
-      // This avoids the workbox generateSW path that uses @rollup/plugin-terser (broken on Node 18)
-      strategies: 'injectManifest',
-      srcDir: 'src',
-      filename: 'sw.ts',
       registerType: 'autoUpdate',
       injectRegister: 'auto',
-
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,png,svg,ico,woff2}'],
+        globIgnores: [
+          '**/tv_channels.json',
+          '**/sports_fixtures.json',
+          '**/sports_teams.json',
+        ],
+        runtimeCaching: [
+          {
+            urlPattern: /\.(png|jpg|jpeg|webp|svg)(\?.*)?$/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'chillz-images-v1',
+              expiration: { maxEntries: 200, maxAgeSeconds: 7 * 24 * 60 * 60 },
+            },
+          },
+          {
+            urlPattern: /supabase\.co/i,
+            handler: 'NetworkFirst',
+            options: { cacheName: 'chillz-api-v1' },
+          },
+        ],
+      },
       includeAssets: [
         'icon-192.png',
         'icon-512.png',
@@ -28,7 +38,6 @@ export default defineConfig({
         'favicon-32.png',
         'favicon-16.png',
       ],
-
       manifest: {
         name: 'Chillz — Watch. Chill. Repeat.',
         short_name: 'Chillz',
@@ -42,69 +51,18 @@ export default defineConfig({
         lang: 'en',
         categories: ['entertainment', 'lifestyle'],
         icons: [
-          {
-            src: 'icon-192.png',
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'any',
-          },
-          {
-            src: 'icon-192.png',
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-          {
-            src: 'icon-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any',
-          },
-          {
-            src: 'icon-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
+          { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
         shortcuts: [
-          {
-            name: 'Live TV',
-            short_name: 'TV',
-            description: 'Browse live TV channels',
-            url: '/tv',
-            icons: [{ src: 'icon-192.png', sizes: '192x192' }],
-          },
-          {
-            name: 'Sports',
-            short_name: 'Sports',
-            description: 'Live sports & fixtures',
-            url: '/sports',
-            icons: [{ src: 'icon-192.png', sizes: '192x192' }],
-          },
-          {
-            name: 'Movies',
-            short_name: 'Movies',
-            description: 'Free movies & TV shows',
-            url: '/movies',
-            icons: [{ src: 'icon-192.png', sizes: '192x192' }],
-          },
+          { name: 'Live TV',  short_name: 'TV',     url: '/tv',      icons: [{ src: 'icon-192.png', sizes: '192x192' }] },
+          { name: 'Sports',   short_name: 'Sports', url: '/sports',  icons: [{ src: 'icon-192.png', sizes: '192x192' }] },
+          { name: 'Movies',   short_name: 'Movies', url: '/movies',  icons: [{ src: 'icon-192.png', sizes: '192x192' }] },
         ],
       },
-
-      injectManifest: {
-        // Only precache app shell assets — skip large JSON data files
-        globPatterns: ['**/*.{js,css,html,png,svg,ico,woff2}'],
-        globIgnores: [
-          '**/tv_channels.json',
-          '**/sports_fixtures.json',
-          '**/sports_teams.json',
-        ],
-      },
-
-      devOptions: {
-        enabled: false,
-      },
+      devOptions: { enabled: false },
     }),
   ],
   server: {
