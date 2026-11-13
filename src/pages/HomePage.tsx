@@ -1,10 +1,8 @@
 import { useNavigate } from 'react-router-dom'
 import { useState, useEffect, useCallback } from 'react'
 import { Play, ArrowRight, Television, SoccerBall, FilmSlate, Star, Clock } from '@phosphor-icons/react'
-import type { Fixture } from '../data/types'
 import type { IptvChannel } from '../lib/iptvApi'
-import { fetchLiveFixtures } from '../lib/sportsApi'
-import staticFixtures from '../data/sports_fixtures.json'
+import { fetchMatches, formatMatchTime, type SportscoreMatch } from '../lib/sportscoreApi'
 import { getContinueWatching, type ContinueItem } from '../lib/watchlist'
 
 // ── Trending movie placeholders (static — real movies loaded on MoviesPage) ──
@@ -21,17 +19,6 @@ const TOP_LEAGUES = [
   { name: 'Serie A',          logo: 'https://crests.football-data.org/SA.png' },
   { name: 'Champions League', logo: 'https://crests.football-data.org/CL.png' },
 ]
-
-function timeUntil(utcDate: string): string {
-  const diff = new Date(utcDate).getTime() - Date.now()
-  if (diff <= 0) return 'Now'
-  const h = Math.floor(diff / 3600000)
-  const m = Math.floor((diff % 3600000) / 60000)
-  const s = Math.floor((diff % 60000) / 1000)
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
-}
 
 // ── Load IPTV channels from sessionStorage (populated by TvPage) ──
 function loadIptvChannels(): IptvChannel[] {
@@ -55,7 +42,7 @@ function loadIptvChannels(): IptvChannel[] {
 export default function HomePage() {
   const navigate = useNavigate()
   const [heroIdx, setHeroIdx]       = useState(0)
-  const [fixtures, setFixtures]     = useState<Fixture[]>(staticFixtures as Fixture[])
+  const [matches, setMatches]       = useState<SportscoreMatch[]>([])
   const [tick, setTick]             = useState(0)
   const [continueList, setContinueList] = useState<ContinueItem[]>([])
   const [iptvChannels, setIptvChannels] = useState<IptvChannel[]>([])
@@ -91,24 +78,24 @@ export default function HomePage() {
     return () => clearInterval(t)
   }, [])
 
-  // Fixtures
-  const loadFixtures = useCallback(async () => {
+  // Fixtures from sportscore
+  const loadMatches = useCallback(async () => {
     try {
-      const data = await fetchLiveFixtures()
-      if (data.length > 0) setFixtures(data)
+      const data = await fetchMatches('football', 50)
+      if (data.length > 0) setMatches(data)
     } catch { /* silent */ }
   }, [])
-  useEffect(() => { loadFixtures() }, [loadFixtures])
+  useEffect(() => { loadMatches() }, [loadMatches])
 
   void tick
 
   const hero = heroSlides[heroIdx] ?? heroSlides[0]
-  const liveFixtures    = fixtures.filter(f => f.status === 'IN_PLAY' || f.status === 'PAUSED').slice(0, 4)
-  const upcomingFixtures = fixtures
-    .filter(f => f.status === 'SCHEDULED' || f.status === 'TIMED')
-    .sort((a, b) => new Date(a.utc_date).getTime() - new Date(b.utc_date).getTime())
+  const liveMatches    = matches.filter(m => m.status === 'live').slice(0, 4)
+  const upcomingMatches = matches
+    .filter(m => m.status === 'upcoming')
+    .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime())
     .slice(0, 4)
-  const matchesToShow = liveFixtures.length > 0 ? liveFixtures : upcomingFixtures
+  const matchesToShow = liveMatches.length > 0 ? liveMatches : upcomingMatches
 
   // Channels for the Live TV row (prioritize Uganda, then popular)
   const ugandaChannels = iptvChannels.filter(c => c.country_code === 'ug' && c.poster_url)
@@ -310,15 +297,16 @@ export default function HomePage() {
         {matchesToShow.length > 0 && (
           <section>
             <SectionHeader
-              title={liveFixtures.length > 0 ? 'Live & Upcoming Matches' : 'Upcoming Matches'}
+              title={liveMatches.length > 0 ? 'Live & Upcoming Matches' : 'Upcoming Matches'}
               sub="FOOTBALL"
               icon={<SoccerBall weight="duotone" size={14} className="text-emerald-400" />}
               desc="Premier League, La Liga, Serie A, Champions League & more"
               onSeeAll={() => navigate('/sports')}
             />
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-              {matchesToShow.map(f => (
-                <MatchCard key={f.id} fixture={f} onClick={() => navigate(`/sports/fixture/${f.id}`)} />
+              {matchesToShow.map((m, idx) => (
+                <MatchCard key={idx} match={m}
+                  onClick={() => navigate(`/sports/fixture/${encodeURIComponent(`${m.home}___${m.away}`)}`, { state: m })} />
               ))}
             </div>
             <div className="mt-5">
@@ -430,11 +418,12 @@ function SectionHeader({ title, sub, icon, desc, onSeeAll }: {
 }
 
 /* ── Match Card ── */
-function MatchCard({ fixture: f, onClick }: { fixture: Fixture; onClick: () => void }) {
-  const isLive     = f.status === 'IN_PLAY' || f.status === 'PAUSED'
-  const isFinished = f.status === 'FINISHED'
-  const date = new Date(f.utc_date)
-  const today = date.toDateString() === new Date().toDateString()
+function MatchCard({ match: m, onClick }: { match: SportscoreMatch; onClick: () => void }) {
+  const isLive     = m.status === 'live'
+  const isFinished = m.status === 'finished'
+  const hasScore   = m.home_score !== null && m.away_score !== null
+  const [hErr, setHErr] = useState(false)
+  const [aErr, setAErr] = useState(false)
 
   return (
     <button onClick={onClick}
@@ -450,51 +439,55 @@ function MatchCard({ fixture: f, onClick }: { fixture: Fixture; onClick: () => v
         style={{ background: 'radial-gradient(ellipse at center, rgba(124,58,237,0.1), transparent 70%)' }} />
       <div className="relative p-3">
         <div className="flex items-center justify-between mb-3">
-          <span className="text-[9px] font-bold text-muted">
-            {today ? 'TODAY' : date.toLocaleDateString([], { month: 'short', day: 'numeric' })}
-            {' · '}{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </span>
+          <span className="text-[9px] font-bold text-muted truncate max-w-[70%]">{m.competition}</span>
           {isLive && (
-            <span className="flex items-center gap-1 bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-md">
+            <span className="flex items-center gap-1 bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-md shrink-0">
               <span className="w-1 h-1 bg-white rounded-full live-dot" /> LIVE
             </span>
           )}
           {!isLive && !isFinished && (
-            <span className="text-[9px] text-emerald-400 font-semibold bg-emerald-400/10 px-1.5 py-0.5 rounded-md">SOON</span>
+            <span className="text-[9px] text-emerald-400 font-semibold bg-emerald-400/10 px-1.5 py-0.5 rounded-md shrink-0">SOON</span>
           )}
         </div>
         <div className="flex items-center justify-between gap-2">
           <div className="flex flex-col items-center gap-1.5 flex-1">
-            <img src={f.home_team_crest} alt="" className="w-10 h-10 object-contain drop-shadow-lg"
-              onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
-            <span className="text-[10px] font-bold text-white text-center line-clamp-1 w-full">
-              {f.home_team_name.split(' ').slice(0, 2).join(' ')}
+            {m.home_logo && !hErr
+              ? <img src={m.home_logo} alt={m.home} className="w-10 h-10 object-contain drop-shadow-lg"
+                  onError={() => setHErr(true)} />
+              : <div className="w-10 h-10 rounded-full bg-surface-2 border border-border flex items-center justify-center">
+                  <span className="text-[9px] font-black text-muted">{m.home.slice(0,2).toUpperCase()}</span>
+                </div>
+            }
+            <span className="text-[10px] font-bold text-white text-center line-clamp-2 w-full leading-tight">
+              {m.home}
             </span>
           </div>
-          <div className="flex flex-col items-center gap-0.5 px-1">
-            {isLive || isFinished ? (
+          <div className="flex flex-col items-center gap-0.5 px-1 shrink-0">
+            {isLive || (isFinished && hasScore) ? (
               <span className={`text-lg font-black tabular-nums ${isLive ? 'text-red-400' : 'text-white'}`}>
-                {f.home_score ?? 0}–{f.away_score ?? 0}
+                {m.home_score}–{m.away_score}
               </span>
             ) : (
               <span className="text-[11px] font-black text-muted">VS</span>
             )}
             {isFinished && <span className="text-[8px] text-muted font-bold">FT</span>}
+            {!isFinished && !isLive && (
+              <span className="text-[8px] text-muted">{formatMatchTime(m.time)}</span>
+            )}
           </div>
           <div className="flex flex-col items-center gap-1.5 flex-1">
-            <img src={f.away_team_crest} alt="" className="w-10 h-10 object-contain drop-shadow-lg"
-              onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
-            <span className="text-[10px] font-bold text-white text-center line-clamp-1 w-full">
-              {f.away_team_name.split(' ').slice(0, 2).join(' ')}
+            {m.away_logo && !aErr
+              ? <img src={m.away_logo} alt={m.away} className="w-10 h-10 object-contain drop-shadow-lg"
+                  onError={() => setAErr(true)} />
+              : <div className="w-10 h-10 rounded-full bg-surface-2 border border-border flex items-center justify-center">
+                  <span className="text-[9px] font-black text-muted">{m.away.slice(0,2).toUpperCase()}</span>
+                </div>
+            }
+            <span className="text-[10px] font-bold text-white text-center line-clamp-2 w-full leading-tight">
+              {m.away}
             </span>
           </div>
         </div>
-        <p className="text-[9px] text-muted font-semibold text-center mt-2 truncate">{f.competition_name}</p>
-        {!isLive && !isFinished && (
-          <p className="text-[9px] text-emerald-400 text-center mt-0.5">
-            🕐 {timeUntil(f.utc_date)}
-          </p>
-        )}
       </div>
     </button>
   )

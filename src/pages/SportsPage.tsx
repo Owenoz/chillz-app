@@ -1,16 +1,13 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import Hls from 'hls.js'
 import {
   SoccerBall, MagnifyingGlass, X, ArrowLeft,
-  ArrowsOut, ArrowClockwise, SpinnerGap,
-  WarningCircle, Television, Broadcast, ArrowRight,
+  ArrowClockwise, SpinnerGap, WarningCircle,
+  Television, Broadcast, ArrowsOut, Warning,
 } from '@phosphor-icons/react'
-import { fetchLiveFixtures } from '../lib/sportsApi'
-import staticData from '../data/sports_fixtures.json'
-import type { Fixture } from '../data/types'
+import { fetchMatches, formatMatchTime, type SportscoreMatch } from '../lib/sportscoreApi'
 
-// ── Types ─────────────────────────────────────────────────────
+// ── Sport channels from public JSON (kept for live TV) ─────────
 interface SportChannel {
   id: number
   name: string
@@ -19,105 +16,125 @@ interface SportChannel {
   url: string
 }
 
-type View = 'channels' | 'fixtures' | 'watch'
+type View = 'fixtures' | 'channels' | 'watch'
 
 const STATUS_TABS = [
   { label: 'All',      value: 'all'      },
-  { label: 'Live',     value: 'live'     },
+  { label: '🔴 Live',  value: 'live'     },
   { label: 'Upcoming', value: 'upcoming' },
   { label: 'Finished', value: 'finished' },
 ]
 
-const FIXTURE_STATIC = staticData as Fixture[]
+type LoadPhase = 'idle' | 'loading' | 'done' | 'error'
 
-function sortFixtures(arr: Fixture[]) {
-  const order: Record<string, number> = { IN_PLAY: 0, PAUSED: 1, TIMED: 2, SCHEDULED: 3, FINISHED: 4, CANCELLED: 5 }
+function sortMatches(arr: SportscoreMatch[]): SportscoreMatch[] {
+  const order: Record<string, number> = { live: 0, upcoming: 1, finished: 2 }
   return [...arr].sort((a, b) => {
-    const ao = order[a.status] ?? 9, bo = order[b.status] ?? 9
+    const ao = order[a.status] ?? 9
+    const bo = order[b.status] ?? 9
     if (ao !== bo) return ao - bo
-    return new Date(a.utc_date).getTime() - new Date(b.utc_date).getTime()
+    return new Date(a.time).getTime() - new Date(b.time).getTime()
   })
 }
 
 export default function SportsPage() {
-  const navigate = useNavigate()
-  const [view, setView]         = useState<View>('channels')
-  const [channels, setChannels] = useState<SportChannel[]>([])
-  const [chLoading, setChLoading] = useState(true)
-  const [activeChannel, setActiveChannel] = useState<SportChannel | null>(null)
-  const [search, setSearch]     = useState('')
-  const [group, setGroup]       = useState('All')
+  const [view, setView]           = useState<View>('fixtures')
+  const [matches, setMatches]     = useState<SportscoreMatch[]>([])
+  const [phase, setPhase]         = useState<LoadPhase>('idle')
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  // Fixtures
-  const [fixtures, setFixtures]       = useState<Fixture[]>(FIXTURE_STATIC)
-  const [fixLoading, setFixLoading]   = useState(false)
-  const [liveLoaded, setLiveLoaded]   = useState(false)
+  // Filters
   const [statusTab, setStatusTab]     = useState('all')
   const [compFilter, setCompFilter]   = useState('All')
-  const [fixSearch, setFixSearch]     = useState('')
+  const [search, setSearch]           = useState('')
 
-  // Load sport channels from public JSON
+  // Channels
+  const [channels, setChannels]       = useState<SportChannel[]>([])
+  const [chLoading, setChLoading]     = useState(false)
+  const [activeChannel, setActiveChannel] = useState<SportChannel | null>(null)
+  const [chSearch, setChSearch]       = useState('')
+  const [chGroup, setChGroup]         = useState('All')
+
+  // ── Load matches ──────────────────────────────────────────────
+  const load = useCallback(async (force = false) => {
+    setPhase('loading')
+    const data = await fetchMatches('football', 100, force)
+    if (data.length > 0) {
+      setMatches(sortMatches(data))
+      setLastUpdated(new Date())
+      setPhase('done')
+    } else {
+      setPhase(force ? 'error' : 'done')
+    }
+  }, [])
+
   useEffect(() => {
+    load()
+    // Auto-refresh every 60 seconds
+    const iv = setInterval(() => load(true), 60000)
+    return () => clearInterval(iv)
+  }, [load])
+
+  // ── Load sport channels ───────────────────────────────────────
+  useEffect(() => {
+    if (view !== 'channels' && view !== 'watch') return
+    if (channels.length > 0) return
+    setChLoading(true)
     fetch('/sports-streams.json')
       .then(r => r.json())
       .then((d: SportChannel[]) => { setChannels(d); setChLoading(false) })
       .catch(() => setChLoading(false))
-  }, [])
+  }, [view, channels.length])
 
-  // Load live fixtures
-  const loadFixtures = useCallback(async (force = false) => {
-    setFixLoading(true)
-    try {
-      const live = await fetchLiveFixtures(force)
-      if (live.length > 0) { setFixtures(live); setLiveLoaded(true) }
-    } catch { /* keep static */ }
-    finally { setFixLoading(false) }
-  }, [])
+  // ── Computed values ───────────────────────────────────────────
+  const liveCount = useMemo(() => matches.filter(m => m.status === 'live').length, [matches])
 
-  useEffect(() => {
-    loadFixtures()
-    // Refresh every 2 minutes, forcing cache bypass
-    const iv = setInterval(() => loadFixtures(true), 120000)
-    return () => clearInterval(iv)
-  }, [loadFixtures])
+  const competitions = useMemo(() =>
+    ['All', ...Array.from(new Set(matches.map(m => m.competition))).sort()],
+    [matches]
+  )
 
-  const groups = useMemo(() =>
+  const filteredMatches = useMemo(() => {
+    const q = search.toLowerCase().trim()
+    return matches.filter(m => {
+      const matchSearch = !q ||
+        m.home.toLowerCase().includes(q) ||
+        m.away.toLowerCase().includes(q) ||
+        m.competition.toLowerCase().includes(q)
+      const matchComp = compFilter === 'All' || m.competition === compFilter
+      const matchStatus =
+        statusTab === 'all' ||
+        (statusTab === 'live'     && m.status === 'live') ||
+        (statusTab === 'upcoming' && m.status === 'upcoming') ||
+        (statusTab === 'finished' && m.status === 'finished')
+      return matchSearch && matchComp && matchStatus
+    })
+  }, [matches, search, compFilter, statusTab])
+
+  // Channel filters
+  const chGroups = useMemo(() =>
     ['All', ...Array.from(new Set(channels.map(c => c.group))).sort()],
     [channels]
   )
-
   const filteredChannels = useMemo(() => {
-    const q = search.toLowerCase()
+    const q = chSearch.toLowerCase()
     return channels.filter(c => {
       const matchSearch = !q || c.name.toLowerCase().includes(q)
-      const matchGroup  = group === 'All' || c.group === group
+      const matchGroup  = chGroup === 'All' || c.group === chGroup
       return matchSearch && matchGroup
     })
-  }, [channels, search, group])
+  }, [channels, chSearch, chGroup])
 
-  const competitions = useMemo(() =>
-    ['All', ...Array.from(new Set(fixtures.map(f => f.competition_name))).sort()],
-    [fixtures]
-  )
-
-  const filteredFixtures = useMemo(() => {
-    const q = fixSearch.toLowerCase()
-    return sortFixtures(fixtures.filter(f => {
-      const matchSearch = !q || f.home_team_name.toLowerCase().includes(q) || f.away_team_name.toLowerCase().includes(q) || f.competition_name.toLowerCase().includes(q)
-      const matchComp  = compFilter === 'All' || f.competition_name === compFilter
-      const matchStatus = statusTab === 'all' ||
-        (statusTab === 'live' && (f.status === 'IN_PLAY' || f.status === 'PAUSED')) ||
-        (statusTab === 'upcoming' && (f.status === 'SCHEDULED' || f.status === 'TIMED')) ||
-        (statusTab === 'finished' && f.status === 'FINISHED')
-      return matchSearch && matchComp && matchStatus
-    }))
-  }, [fixtures, fixSearch, compFilter, statusTab])
-
-  const liveCount = fixtures.filter(f => f.status === 'IN_PLAY' || f.status === 'PAUSED').length
-
-  // ── Channel player view ────────────────────────────────────
+  // Channel watch view
   if (view === 'watch' && activeChannel) {
-    return <ChannelPlayer channel={activeChannel} onBack={() => setView('channels')} channels={filteredChannels} onSwitch={ch => setActiveChannel(ch)} />
+    return (
+      <ChannelPlayer
+        channel={activeChannel}
+        channels={filteredChannels}
+        onBack={() => setView('channels')}
+        onSwitch={ch => setActiveChannel(ch)}
+      />
+    )
   }
 
   return (
@@ -125,22 +142,26 @@ export default function SportsPage() {
 
       {/* ── Hero ── */}
       <div className="relative overflow-hidden">
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute top-0 right-0 w-80 h-80 rounded-full blur-[100px] opacity-10" style={{ background: 'radial-gradient(#10b981,transparent)' }} />
-        </div>
-        <div className="relative h-40 overflow-hidden">
-          <img src="https://images.unsplash.com/photo-1522778119026-d647f0596c20?w=1200&auto=format&fit=crop&q=80"
-            alt="" className="w-full h-full object-cover opacity-30"
-            onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
-          <div className="absolute inset-0" style={{ background: 'linear-gradient(to right,rgba(10,10,15,0.95) 0%,rgba(10,10,15,0.7) 60%,rgba(10,10,15,0.3) 100%)' }} />
+        <div className="relative h-44 overflow-hidden">
+          <img
+            src="https://images.unsplash.com/photo-1522778119026-d647f0596c20?w=1200&auto=format&fit=crop&q=80"
+            alt="" className="w-full h-full object-cover opacity-25"
+            onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
+          />
+          <div className="absolute inset-0" style={{ background: 'linear-gradient(to right,rgba(10,10,15,0.97) 0%,rgba(10,10,15,0.7) 60%,rgba(10,10,15,0.4) 100%)' }} />
           <div className="absolute inset-0" style={{ background: 'linear-gradient(to top,#0A0A0F 0%,transparent 60%)' }} />
-          <div className="absolute inset-0 flex flex-col justify-end px-5 pb-4">
+          <div className="absolute inset-0 flex flex-col justify-end px-5 pb-5">
             {liveCount > 0 && (
-              <span className="flex items-center gap-1.5 text-[10px] font-black tracking-widest text-red-400 uppercase mb-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-red-500 live-dot" /> {liveCount} LIVE
+              <span className="flex items-center gap-1.5 text-[10px] font-black tracking-widest text-red-400 uppercase mb-1.5">
+                <span className="w-2 h-2 rounded-full bg-red-500 live-dot" /> {liveCount} LIVE NOW
               </span>
             )}
             <h1 className="text-3xl font-black text-white tracking-tight">Live Sports</h1>
+            <p className="text-muted text-sm mt-0.5">
+              {phase === 'loading' && matches.length === 0
+                ? 'Loading matches…'
+                : `${matches.length} matches · Powered by Sportscore`}
+            </p>
           </div>
         </div>
       </div>
@@ -150,8 +171,8 @@ export default function SportsPage() {
         <div className="flex gap-1 p-1 rounded-2xl w-fit"
           style={{ background: 'rgba(19,17,28,0.9)', border: '1px solid rgba(45,38,69,0.7)' }}>
           {([
-            { key: 'channels', label: 'Live Channels', Icon: Television },
             { key: 'fixtures', label: 'Fixtures',      Icon: SoccerBall },
+            { key: 'channels', label: 'Live Channels', Icon: Television },
           ] as { key: View; label: string; Icon: React.ElementType }[]).map(({ key, label, Icon }) => (
             <button key={key} onClick={() => setView(key)}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all"
@@ -162,49 +183,181 @@ export default function SportsPage() {
               }}>
               <Icon weight="duotone" size={15} />
               {label}
+              {key === 'fixtures' && liveCount > 0 && (
+                <span className="text-[9px] font-black bg-red-600 text-white px-1.5 py-0.5 rounded-full">
+                  {liveCount}
+                </span>
+              )}
             </button>
           ))}
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-5 mt-5 space-y-5">
+      <div className="max-w-7xl mx-auto px-5 mt-5 space-y-4">
+
+        {/* ══ FIXTURES VIEW ══ */}
+        {view === 'fixtures' && (
+          <>
+            {/* Search + refresh row */}
+            <div className="flex gap-3">
+              <div className="relative flex-1">
+                <MagnifyingGlass weight="bold" size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+                <input type="text" placeholder="Search teams or competitions…" value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  className="w-full rounded-2xl pl-10 pr-9 py-2.5 text-sm text-white placeholder-muted focus:outline-none"
+                  style={{ background: 'rgba(19,17,28,0.8)', border: '1px solid rgba(45,38,69,0.8)' }} />
+                {search && (
+                  <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-white">
+                    <X weight="bold" size={13} />
+                  </button>
+                )}
+              </div>
+              <button onClick={() => load(true)} disabled={phase === 'loading'}
+                className="w-10 h-10 rounded-xl border border-border bg-surface-2 flex items-center justify-center text-muted hover:text-white hover:border-primary/40 transition-all disabled:opacity-50"
+                title="Refresh">
+                {phase === 'loading'
+                  ? <SpinnerGap weight="bold" size={15} className="animate-spin" />
+                  : <ArrowClockwise weight="bold" size={15} />}
+              </button>
+            </div>
+
+            {/* Status tabs */}
+            <div className="flex gap-1 p-1 rounded-2xl w-fit"
+              style={{ background: 'rgba(19,17,28,0.8)', border: '1px solid rgba(45,38,69,0.6)' }}>
+              {STATUS_TABS.map(t => (
+                <button key={t.value} onClick={() => setStatusTab(t.value)}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap"
+                  style={{
+                    background: statusTab === t.value ? 'linear-gradient(135deg,#7C3AED,#5B21B6)' : 'transparent',
+                    color: statusTab === t.value ? '#fff' : '#7C7A91',
+                    boxShadow: statusTab === t.value ? '0 4px 12px rgba(124,58,237,0.4)' : 'none',
+                  }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Competition filter pills */}
+            <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+              {competitions.slice(0, 20).map(c => (
+                <button key={c} onClick={() => setCompFilter(c)}
+                  className="shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap"
+                  style={{
+                    background: compFilter === c ? 'rgba(124,58,237,0.2)' : 'rgba(19,17,28,0.6)',
+                    border: `1px solid ${compFilter === c ? 'rgba(124,58,237,0.5)' : 'rgba(45,38,69,0.6)'}`,
+                    color: compFilter === c ? '#A78BFA' : '#7C7A91',
+                  }}>
+                  {c}
+                </button>
+              ))}
+            </div>
+
+            {/* Stats row */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted">
+                <span className="text-white font-bold">{filteredMatches.length}</span> matches
+              </p>
+              {lastUpdated && (
+                <p className="text-[10px] text-muted">
+                  Updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </p>
+              )}
+            </div>
+
+            {/* Loading skeleton */}
+            {phase === 'loading' && matches.length === 0 && (
+              <div className="space-y-3">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="rounded-2xl animate-pulse"
+                    style={{ background: 'rgba(19,17,28,0.7)', border: '1px solid rgba(45,38,69,0.5)' }}>
+                    <div className="flex items-center gap-3 px-4 py-4">
+                      <div className="w-8 h-8 rounded-full skeleton shrink-0" />
+                      <div className="flex-1 space-y-1.5">
+                        <div className="h-3 skeleton rounded w-3/4" />
+                        <div className="h-2 skeleton rounded w-1/3" />
+                      </div>
+                      <div className="w-16 h-6 skeleton rounded shrink-0" />
+                      <div className="flex-1 space-y-1.5">
+                        <div className="h-3 skeleton rounded w-3/4 ml-auto" />
+                      </div>
+                      <div className="w-8 h-8 rounded-full skeleton shrink-0" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Error */}
+            {phase === 'error' && (
+              <div className="rounded-2xl p-8 text-center border border-border bg-surface space-y-3">
+                <Warning weight="duotone" size={36} className="text-amber-400 mx-auto" />
+                <p className="font-bold text-white">Couldn't load matches</p>
+                <p className="text-sm text-muted">Check your connection and try again.</p>
+                <button onClick={() => load(true)}
+                  className="btn-primary px-5 py-2 rounded-xl text-sm font-bold text-white">
+                  ↺ Retry
+                </button>
+              </div>
+            )}
+
+            {/* Empty */}
+            {phase === 'done' && filteredMatches.length === 0 && (
+              <div className="text-center py-16">
+                <SoccerBall weight="duotone" size={40} className="text-muted opacity-40 mx-auto mb-3" />
+                <p className="text-muted">No matches match your filters</p>
+                <button onClick={() => { setSearch(''); setCompFilter('All'); setStatusTab('all') }}
+                  className="text-primary-light text-sm mt-2 hover:underline">Clear filters</button>
+              </div>
+            )}
+
+            {/* Match list */}
+            {filteredMatches.length > 0 && (
+              <MatchList matches={filteredMatches} />
+            )}
+          </>
+        )}
 
         {/* ══ CHANNELS VIEW ══ */}
         {view === 'channels' && (
           <>
-            {/* Search + group */}
             <div className="flex gap-3">
               <div className="relative flex-1">
                 <MagnifyingGlass weight="bold" size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-                <input type="text" placeholder="Search channels…" value={search}
-                  onChange={e => setSearch(e.target.value)}
+                <input type="text" placeholder="Search sport channels…" value={chSearch}
+                  onChange={e => setChSearch(e.target.value)}
                   className="w-full rounded-2xl pl-10 pr-9 py-2.5 text-sm text-white placeholder-muted focus:outline-none"
                   style={{ background: 'rgba(19,17,28,0.8)', border: '1px solid rgba(45,38,69,0.8)' }} />
-                {search && <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-white"><X weight="bold" size={13} /></button>}
+                {chSearch && (
+                  <button onClick={() => setChSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-white">
+                    <X weight="bold" size={13} />
+                  </button>
+                )}
               </div>
             </div>
 
             {/* Group pills */}
             <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-              {groups.map(g => (
-                <button key={g} onClick={() => setGroup(g)}
-                  className="shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all"
+              {chGroups.map(g => (
+                <button key={g} onClick={() => setChGroup(g)}
+                  className="shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap"
                   style={{
-                    background: group === g ? 'linear-gradient(135deg,#7C3AED,#5B21B6)' : 'rgba(19,17,28,0.7)',
-                    border: `1px solid ${group === g ? 'rgba(124,58,237,0.5)' : 'rgba(45,38,69,0.6)'}`,
-                    color: group === g ? '#fff' : '#7C7A91',
-                    boxShadow: group === g ? '0 4px 12px rgba(124,58,237,0.4)' : 'none',
+                    background: chGroup === g ? 'linear-gradient(135deg,#7C3AED,#5B21B6)' : 'rgba(19,17,28,0.7)',
+                    border: `1px solid ${chGroup === g ? 'rgba(124,58,237,0.5)' : 'rgba(45,38,69,0.6)'}`,
+                    color: chGroup === g ? '#fff' : '#7C7A91',
+                    boxShadow: chGroup === g ? '0 4px 12px rgba(124,58,237,0.4)' : 'none',
                   }}>
                   {g}
                 </button>
               ))}
             </div>
 
-            <p className="text-xs text-muted"><span className="text-white font-bold">{filteredChannels.length}</span> channels</p>
+            <p className="text-xs text-muted">
+              <span className="text-white font-bold">{filteredChannels.length}</span> channels
+            </p>
 
             {chLoading ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                {Array.from({length:12}).map((_,i) => (
+                {Array.from({ length: 10 }).map((_, i) => (
                   <div key={i} className="rounded-2xl skeleton aspect-video" />
                 ))}
               </div>
@@ -223,85 +376,147 @@ export default function SportsPage() {
             )}
           </>
         )}
-
-        {/* ══ FIXTURES VIEW ══ */}
-        {view === 'fixtures' && (
-          <>
-            {/* Search + refresh */}
-            <div className="flex gap-3">
-              <div className="relative flex-1">
-                <MagnifyingGlass weight="bold" size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-                <input type="text" placeholder="Search teams or competitions…" value={fixSearch}
-                  onChange={e => setFixSearch(e.target.value)}
-                  className="w-full rounded-2xl pl-10 pr-9 py-2.5 text-sm text-white placeholder-muted focus:outline-none"
-                  style={{ background: 'rgba(19,17,28,0.8)', border: '1px solid rgba(45,38,69,0.8)' }} />
-                {fixSearch && <button onClick={() => setFixSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-white"><X weight="bold" size={13} /></button>}
-              </div>
-              <button onClick={() => loadFixtures(true)} disabled={fixLoading}
-                className="w-10 h-10 rounded-xl border border-border bg-surface-2 flex items-center justify-center text-muted hover:text-white hover:border-primary/40 transition-all disabled:opacity-50">
-                {fixLoading ? <SpinnerGap weight="bold" size={15} className="animate-spin" /> : <ArrowClockwise weight="bold" size={15} />}
-              </button>
-            </div>
-
-            {/* Status tabs */}
-            <div className="flex gap-1 p-1 rounded-2xl w-fit"
-              style={{ background: 'rgba(19,17,28,0.8)', border: '1px solid rgba(45,38,69,0.6)' }}>
-              {STATUS_TABS.map(t => (
-                <button key={t.value} onClick={() => setStatusTab(t.value)}
-                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all"
-                  style={{
-                    background: statusTab === t.value ? 'linear-gradient(135deg,#7C3AED,#5B21B6)' : 'transparent',
-                    color: statusTab === t.value ? '#fff' : '#7C7A91',
-                    boxShadow: statusTab === t.value ? '0 4px 12px rgba(124,58,237,0.4)' : 'none',
-                  }}>
-                  {t.value === 'live' && liveCount > 0 ? `🔴 Live (${liveCount})` : t.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Competition pills */}
-            <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-              {competitions.slice(0, 16).map(c => (
-                <button key={c} onClick={() => setCompFilter(c)}
-                  className="shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap"
-                  style={{
-                    background: compFilter === c ? 'rgba(124,58,237,0.2)' : 'rgba(19,17,28,0.6)',
-                    border: `1px solid ${compFilter === c ? 'rgba(124,58,237,0.5)' : 'rgba(45,38,69,0.6)'}`,
-                    color: compFilter === c ? '#A78BFA' : '#7C7A91',
-                  }}>
-                  {c}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-muted"><span className="text-white font-bold">{filteredFixtures.length}</span> fixtures</p>
-              {!liveLoaded && <p className="text-[10px] text-primary-light flex items-center gap-1"><SpinnerGap weight="bold" size={10} className="animate-spin" /> Updating…</p>}
-            </div>
-
-            {/* Watch live CTA */}
-            <button onClick={() => setView('channels')}
-              className="w-full flex items-center justify-between px-4 py-3 rounded-2xl text-sm font-bold text-white transition-all hover:-translate-y-0.5"
-              style={{ background: 'linear-gradient(135deg,rgba(124,58,237,0.2),rgba(16,185,129,0.1))', border: '1px solid rgba(124,58,237,0.3)', boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
-              <span className="flex items-center gap-2">
-                <Television weight="fill" size={16} className="text-primary-light" />
-                Watch Live Sports Channels ({channels.length}+)
-              </span>
-              <ArrowRight size={14} />
-            </button>
-
-            {filteredFixtures.length === 0 ? (
-              <div className="text-center py-16">
-                <SoccerBall weight="duotone" size={40} className="text-muted opacity-40 mx-auto mb-3" />
-                <p className="text-muted">No fixtures match your filters</p>
-              </div>
-            ) : (
-              <FixtureList fixtures={filteredFixtures} onSelect={f => navigate(`/sports/fixture/${f.id}`)} />
-            )}
-          </>
-        )}
       </div>
     </div>
+  )
+}
+
+/* ── Match List — grouped by competition ─────────────────────── */
+function MatchList({ matches }: { matches: SportscoreMatch[] }) {
+  // Group by competition
+  const groups = useMemo(() => {
+    const map = new Map<string, SportscoreMatch[]>()
+    for (const m of matches) {
+      if (!map.has(m.competition)) map.set(m.competition, [])
+      map.get(m.competition)!.push(m)
+    }
+    // Sort groups: live competitions first
+    return Array.from(map.entries()).sort(([, a], [, b]) => {
+      const aLive = a.some(m => m.status === 'live') ? 0 : 1
+      const bLive = b.some(m => m.status === 'live') ? 0 : 1
+      return aLive - bLive
+    })
+  }, [matches])
+
+  return (
+    <div className="space-y-6 pb-4">
+      {groups.map(([comp, compMatches]) => {
+        const hasLive = compMatches.some(m => m.status === 'live')
+        const logoUrl = compMatches[0]?.competition_logo
+        return (
+          <div key={comp}>
+            {/* Competition header */}
+            <div className="flex items-center gap-3 mb-2.5">
+              {logoUrl ? (
+                <img src={logoUrl} alt={comp} className="w-5 h-5 object-contain shrink-0"
+                  onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
+              ) : (
+                <SoccerBall weight="duotone" size={16} className="text-primary-light shrink-0" />
+              )}
+              <span className="text-[11px] font-black text-white uppercase tracking-wide truncate">{comp}</span>
+              {hasLive && (
+                <span className="shrink-0 flex items-center gap-1 text-[8px] font-black text-red-400 bg-red-500/15 border border-red-500/25 px-1.5 py-0.5 rounded-full">
+                  <span className="w-1 h-1 bg-red-500 rounded-full live-dot" /> LIVE
+                </span>
+              )}
+              <span className="h-px flex-1 opacity-20" style={{ background: 'rgba(124,58,237,0.6)' }} />
+              <span className="text-[9px] text-muted shrink-0">{compMatches.length}</span>
+            </div>
+
+            {/* Match rows */}
+            <div className="space-y-2">
+              {compMatches.map((m, idx) => (
+                <MatchRow key={`${m.home}-${m.away}-${idx}`} match={m} />
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ── Match Row ───────────────────────────────────────────────── */
+function MatchRow({ match: m }: { match: SportscoreMatch }) {
+  const isLive     = m.status === 'live'
+  const isFinished = m.status === 'finished'
+  const hasScore   = m.home_score !== null && m.away_score !== null
+
+  return (
+    <div className="rounded-2xl border transition-all"
+      style={{
+        background: isLive
+          ? 'linear-gradient(135deg,rgba(239,68,68,0.1),rgba(19,17,28,0.95))'
+          : 'rgba(19,17,28,0.7)',
+        border: `1px solid ${isLive ? 'rgba(239,68,68,0.25)' : 'rgba(45,38,69,0.7)'}`,
+        boxShadow: isLive ? '0 0 20px rgba(239,68,68,0.08)' : '0 2px 12px rgba(0,0,0,0.3)',
+      }}>
+      <div className="flex items-center gap-3 px-4 py-3">
+
+        {/* Home team */}
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <TeamLogo src={m.home_logo} name={m.home} />
+          <span className={`text-sm font-bold truncate ${
+            isFinished && hasScore && Number(m.home_score) > Number(m.away_score) ? 'text-white' :
+            isFinished ? 'text-muted' : 'text-white'
+          }`}>{m.home}</span>
+        </div>
+
+        {/* Score / time */}
+        <div className="shrink-0 text-center min-w-[80px]">
+          {isLive ? (
+            <div className="flex flex-col items-center gap-0.5">
+              <span className="text-xl font-black text-red-400 tabular-nums leading-none">
+                {m.home_score ?? 0}–{m.away_score ?? 0}
+              </span>
+              <span className="flex items-center gap-1 text-[9px] text-red-400 font-black">
+                <span className="w-1.5 h-1.5 bg-red-500 rounded-full live-dot" />
+                {m.status_text}
+              </span>
+            </div>
+          ) : isFinished && hasScore ? (
+            <div className="flex flex-col items-center gap-0.5">
+              <span className="text-xl font-black text-white tabular-nums leading-none">
+                {m.home_score}–{m.away_score}
+              </span>
+              <span className="text-[9px] text-muted font-bold uppercase">{m.status_text}</span>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-0.5">
+              <span className="text-sm font-black text-white tabular-nums">{formatMatchTime(m.time)}</span>
+              <span className="text-[9px] font-semibold"
+                style={{ color: m.status_text === 'Postponed' ? '#f59e0b' : m.status_text === 'Delayed' ? '#f97316' : '#10b981' }}>
+                {m.status_text}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Away team */}
+        <div className="flex items-center gap-2 flex-1 min-w-0 justify-end">
+          <span className={`text-sm font-bold truncate text-right ${
+            isFinished && hasScore && Number(m.away_score) > Number(m.home_score) ? 'text-white' :
+            isFinished ? 'text-muted' : 'text-white'
+          }`}>{m.away}</span>
+          <TeamLogo src={m.away_logo} name={m.away} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TeamLogo({ src, name }: { src: string; name: string }) {
+  const [err, setErr] = useState(false)
+  if (!src || err) {
+    return (
+      <div className="w-7 h-7 rounded-full bg-surface-2 border border-border flex items-center justify-center shrink-0">
+        <span className="text-[9px] font-black text-muted">{name.slice(0, 2).toUpperCase()}</span>
+      </div>
+    )
+  }
+  return (
+    <img src={src} alt={name} className="w-7 h-7 object-contain shrink-0 drop-shadow-md"
+      onError={() => setErr(true)} />
   )
 }
 
@@ -309,12 +524,12 @@ export default function SportsPage() {
 function ChannelCard({ channel: ch, onClick }: { channel: SportChannel; onClick: () => void }) {
   return (
     <button onClick={onClick}
-      className="group relative overflow-hidden rounded-2xl border border-border bg-surface hover:border-primary/40 transition-all hover:-translate-y-0.5 channel-glow text-left w-full">
+      className="group relative overflow-hidden rounded-2xl border border-border bg-surface hover:border-primary/40 transition-all hover:-translate-y-0.5 w-full text-left">
       <div className="aspect-video relative overflow-hidden bg-surface-2 flex items-center justify-center">
         {ch.logo ? (
           <img src={ch.logo} alt={ch.name} loading="lazy"
             className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-400"
-            onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }} />
+            onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
         ) : (
           <div className="w-full h-full flex items-center justify-center"
             style={{ background: 'linear-gradient(135deg,rgba(124,58,237,0.15),rgba(10,10,15,0.9))' }}>
@@ -330,10 +545,6 @@ function ChannelCard({ channel: ch, onClick }: { channel: SportChannel; onClick:
         <div className="absolute top-1.5 left-1.5 flex items-center gap-1 bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-md">
           <span className="w-1 h-1 bg-white rounded-full live-dot" /> LIVE
         </div>
-        <div className="absolute top-1.5 right-1.5 text-[8px] font-bold px-1.5 py-0.5 rounded-md text-white"
-          style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)' }}>
-          HLS
-        </div>
       </div>
       <div className="p-2">
         <p className="text-[11px] font-bold text-white truncate">{ch.name}</p>
@@ -343,17 +554,17 @@ function ChannelCard({ channel: ch, onClick }: { channel: SportChannel; onClick:
   )
 }
 
-/* ── HLS Player ── */
-function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
+/* ── HLS Channel Player ──────────────────────────────────────── */
+function ChannelPlayer({ channel, channels, onBack, onSwitch }: {
   channel: SportChannel
-  onBack: () => void
   channels: SportChannel[]
+  onBack: () => void
   onSwitch: (ch: SportChannel) => void
 }) {
-  const videoRef    = useRef<HTMLVideoElement>(null)
-  const hlsRef      = useRef<Hls | null>(null)
+  const videoRef     = useRef<HTMLVideoElement>(null)
+  const hlsRef       = useRef<Hls | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [state, setState]     = useState<'loading' | 'playing' | 'error'>('loading')
+  const [state, setState]       = useState<'loading' | 'playing' | 'error'>('loading')
   const [errorMsg, setErrorMsg] = useState('')
   const [retryKey, setRetryKey] = useState(0)
   const [isFs, setIsFs]         = useState(false)
@@ -362,14 +573,12 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
   const sidebarChannels = channels.filter(c =>
     c.id !== channel.id &&
     (!search || c.name.toLowerCase().includes(search.toLowerCase()))
-  ).slice(0, 40)
+  ).slice(0, 50)
 
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
-    setState('loading')
-    setErrorMsg('')
-
+    setState('loading'); setErrorMsg('')
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null }
 
     const onErr = (msg = 'Stream unavailable. Try another channel.') => {
@@ -416,15 +625,12 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
   return (
     <div className="bg-mesh min-h-screen pb-24">
       <div className="max-w-7xl mx-auto px-4 py-4">
-
-        {/* Back */}
         <button onClick={onBack}
           className="flex items-center gap-1.5 text-sm text-muted hover:text-white mb-4 transition-colors group">
           <ArrowLeft weight="bold" size={14} className="group-hover:-translate-x-0.5 transition-transform" /> Back to channels
         </button>
 
         <div className="grid lg:grid-cols-3 gap-5">
-
           {/* Player */}
           <div className="lg:col-span-2 space-y-3">
             <div className="flex flex-wrap items-center gap-3">
@@ -438,17 +644,12 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
             <div ref={containerRef}
               className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-border"
               style={{ boxShadow: '0 0 0 1px rgba(255,255,255,0.04), 0 32px 64px rgba(0,0,0,0.7)' }}>
-
               {state === 'loading' && (
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black gap-4 pointer-events-none">
-                  <div className="relative">
-                    <SpinnerGap weight="bold" size={40} className="text-primary animate-spin" />
-                    <div className="absolute inset-0 rounded-full blur-xl opacity-25" style={{ background: '#7C3AED' }} />
-                  </div>
+                  <SpinnerGap weight="bold" size={40} className="text-primary animate-spin" />
                   <p className="text-xs text-muted">Connecting to stream…</p>
                 </div>
               )}
-
               {state === 'error' && (
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/95 gap-4 p-6 text-center">
                   <WarningCircle weight="duotone" size={36} className="text-amber-500" />
@@ -462,15 +663,13 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
                   <button onClick={onBack} className="text-xs text-muted hover:text-white transition-colors">Browse other channels</button>
                 </div>
               )}
-
-              <video ref={videoRef} className="absolute inset-0 w-full h-full"
+              <video ref={videoRef} key={retryKey}
+                className="absolute inset-0 w-full h-full"
                 controls autoPlay muted playsInline
                 poster={channel.logo || undefined}
-                onError={() => { setState('error'); setErrorMsg('Stream failed to load.') }}
-              />
+                onError={() => { setState('error'); setErrorMsg('Stream failed to load.') }} />
             </div>
 
-            {/* Controls */}
             <div className="flex gap-2 flex-wrap">
               <button onClick={() => setRetryKey(k => k + 1)}
                 className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-muted hover:text-white transition-all"
@@ -485,7 +684,7 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
             </div>
           </div>
 
-          {/* Sidebar channels */}
+          {/* Sidebar */}
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <Broadcast weight="duotone" size={15} className="text-primary-light" /> More Channels
@@ -501,10 +700,11 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
             <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-0.5 no-scrollbar">
               {sidebarChannels.map(ch => (
                 <button key={ch.id} onClick={() => onSwitch(ch)}
-                  className={`w-full flex items-center gap-3 p-2.5 rounded-xl text-left transition-all group ${ch.id === channel.id ? 'bg-primary/15 border border-primary/30' : 'bg-surface border border-border hover:border-primary/30 hover:bg-surface-2'}`}>
+                  className="w-full flex items-center gap-3 p-2.5 rounded-xl text-left transition-all group bg-surface border border-border hover:border-primary/30 hover:bg-surface-2">
                   <div className="w-14 h-9 rounded-lg overflow-hidden bg-surface-2 shrink-0 flex items-center justify-center">
                     {ch.logo
-                      ? <img src={ch.logo} alt="" className="w-full h-full object-cover" onError={e => ((e.currentTarget as HTMLImageElement).style.display='none')} />
+                      ? <img src={ch.logo} alt="" className="w-full h-full object-cover"
+                          onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
                       : <Broadcast weight="duotone" size={16} className="text-primary-light opacity-50" />}
                   </div>
                   <div className="min-w-0 flex-1">
@@ -519,66 +719,5 @@ function ChannelPlayer({ channel, onBack, channels, onSwitch }: {
         </div>
       </div>
     </div>
-  )
-}
-
-/* ── Fixture list ── */
-function FixtureList({ fixtures, onSelect }: { fixtures: Fixture[]; onSelect: (f: Fixture) => void }) {
-  const groups: Record<string, Fixture[]> = {}
-  for (const f of fixtures) {
-    if (!groups[f.competition_name]) groups[f.competition_name] = []
-    groups[f.competition_name].push(f)
-  }
-  return (
-    <div className="space-y-5">
-      {Object.entries(groups).map(([comp, matches]) => (
-        <div key={comp}>
-          <div className="flex items-center gap-3 mb-2">
-            <span className="h-px flex-1" style={{ background: 'rgba(45,38,69,0.6)' }} />
-            <span className="text-[10px] font-black text-muted uppercase tracking-widest whitespace-nowrap">{comp}</span>
-            <span className="h-px flex-1" style={{ background: 'rgba(45,38,69,0.6)' }} />
-          </div>
-          <div className="space-y-2">
-            {matches.map(f => <FixtureRow key={f.id} fixture={f} onClick={() => onSelect(f)} />)}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function FixtureRow({ fixture: f, onClick }: { fixture: Fixture; onClick: () => void }) {
-  const isLive = f.status === 'IN_PLAY' || f.status === 'PAUSED'
-  const isFin  = f.status === 'FINISHED'
-  const date   = new Date(f.utc_date)
-  return (
-    <button onClick={onClick} className="w-full text-left rounded-2xl border transition-all hover:-translate-y-0.5 group"
-      style={{
-        background: isLive ? 'linear-gradient(135deg,rgba(239,68,68,0.1),rgba(19,17,28,0.95))' : 'rgba(19,17,28,0.7)',
-        border: `1px solid ${isLive ? 'rgba(239,68,68,0.25)' : 'rgba(45,38,69,0.8)'}`,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-      }}>
-      <div className="flex items-center gap-3 px-4 py-3">
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <img src={f.home_team_crest} alt="" className="w-6 h-6 object-contain shrink-0"
-            onError={e => ((e.currentTarget as HTMLImageElement).style.display='none')} />
-          <span className={`text-sm font-bold truncate ${f.winner==='HOME_TEAM' ? 'text-white' : isFin ? 'text-muted' : 'text-white'}`}>{f.home_team_name}</span>
-        </div>
-        <div className="shrink-0 text-center min-w-[76px]">
-          {isLive ? (
-            <div className="flex flex-col items-center"><span className="text-lg font-black text-red-400 tabular-nums">{f.home_score??0}–{f.away_score??0}</span><span className="flex items-center gap-1 text-[9px] text-red-400 font-black"><span className="w-1 h-1 bg-red-500 rounded-full live-dot" /> LIVE</span></div>
-          ) : isFin ? (
-            <div className="flex flex-col items-center"><span className="text-lg font-black text-white tabular-nums">{f.home_score??0}–{f.away_score??0}</span><span className="text-[9px] text-muted font-bold">FT</span></div>
-          ) : (
-            <div className="flex flex-col items-center"><span className="text-sm font-bold text-white tabular-nums">{date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span><span className="text-[9px] text-muted">{date.toLocaleDateString([],{month:'short',day:'numeric'})}</span></div>
-          )}
-        </div>
-        <div className="flex items-center gap-2 flex-1 min-w-0 justify-end">
-          <span className={`text-sm font-bold truncate text-right ${f.winner==='AWAY_TEAM' ? 'text-white' : isFin ? 'text-muted' : 'text-white'}`}>{f.away_team_name}</span>
-          <img src={f.away_team_crest} alt="" className="w-6 h-6 object-contain shrink-0"
-            onError={e => ((e.currentTarget as HTMLImageElement).style.display='none')} />
-        </div>
-      </div>
-    </button>
   )
 }
