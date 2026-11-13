@@ -9,8 +9,8 @@ import { useAuth } from '../contexts/AuthContext'
 const SECTIONS = [
   {
     id: 'radio',
-    label: 'Uganda Radio',
-    desc: '10 stations · CBS, Akaboozi, Capital, Sanyu & more',
+    label: 'World Radio',
+    desc: '45,000+ stations · Uganda, Kenya, Nigeria, UK, USA & more',
     icon: Radio,
     color: '#7C3AED',
     path: '/radio',

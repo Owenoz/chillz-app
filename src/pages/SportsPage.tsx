@@ -65,10 +65,10 @@ export default function SportsPage() {
   }, [])
 
   // Load live fixtures
-  const loadFixtures = useCallback(async () => {
+  const loadFixtures = useCallback(async (force = false) => {
     setFixLoading(true)
     try {
-      const live = await fetchLiveFixtures()
+      const live = await fetchLiveFixtures(force)
       if (live.length > 0) { setFixtures(live); setLiveLoaded(true) }
     } catch { /* keep static */ }
     finally { setFixLoading(false) }
@@ -76,7 +76,8 @@ export default function SportsPage() {
 
   useEffect(() => {
     loadFixtures()
-    const iv = setInterval(loadFixtures, 60000)
+    // Refresh every 2 minutes, forcing cache bypass
+    const iv = setInterval(() => loadFixtures(true), 120000)
     return () => clearInterval(iv)
   }, [loadFixtures])
 
@@ -236,7 +237,7 @@ export default function SportsPage() {
                   style={{ background: 'rgba(19,17,28,0.8)', border: '1px solid rgba(45,38,69,0.8)' }} />
                 {fixSearch && <button onClick={() => setFixSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-white"><X weight="bold" size={13} /></button>}
               </div>
-              <button onClick={loadFixtures} disabled={fixLoading}
+              <button onClick={() => loadFixtures(true)} disabled={fixLoading}
                 className="w-10 h-10 rounded-xl border border-border bg-surface-2 flex items-center justify-center text-muted hover:text-white hover:border-primary/40 transition-all disabled:opacity-50">
                 {fixLoading ? <SpinnerGap weight="bold" size={15} className="animate-spin" /> : <ArrowClockwise weight="bold" size={15} />}
               </button>

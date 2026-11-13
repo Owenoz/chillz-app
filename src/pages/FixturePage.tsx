@@ -2,16 +2,16 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { ArrowLeft, SpinnerGap, SoccerBall, Television } from '@phosphor-icons/react'
 import { fetchFixtureById, fetchLiveFixtures } from '../lib/sportsApi'
-import channelsData from '../data/tv_channels.json'
-import type { Fixture, TvChannel } from '../data/types'
+import type { Fixture } from '../data/types'
+import type { IptvChannel } from '../lib/iptvApi'
 
-const allChannels = channelsData as TvChannel[]
-
-function findRelatedChannels(): TvChannel[] {
-  const keywords = ['sport', 'sports', 'football', 'soccer']
-  return allChannels
-    .filter(c => c.active && keywords.some(kw => c.title.toLowerCase().includes(kw)))
-    .slice(0, 6)
+function findSportsChannels(): IptvChannel[] {
+  try {
+    const raw = sessionStorage.getItem('chillz_iptv_channels_v3')
+    if (!raw) return []
+    const data = JSON.parse(raw) as { byCategory: Record<string, IptvChannel[]> }
+    return (data.byCategory?.sports || []).slice(0, 6)
+  } catch { return [] }
 }
 
 export default function FixturePage() {
@@ -74,7 +74,7 @@ export default function FixturePage() {
   const isLive     = fixture.status === 'IN_PLAY' || fixture.status === 'PAUSED'
   const isFinished = fixture.status === 'FINISHED'
   const date       = new Date(fixture.utc_date)
-  const relatedChannels = findRelatedChannels()
+  const relatedChannels = findSportsChannels()
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-6 pb-24 md:pb-8 space-y-5">
@@ -173,7 +173,7 @@ export default function FixturePage() {
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {relatedChannels.map(ch => (
-              <button key={ch.id} onClick={() => navigate(`/tv/watch/${ch.id}`)}
+              <button key={ch.id} onClick={() => navigate(`/tv/watch/${encodeURIComponent(ch.id)}`, { state: ch })}
                 className="flex items-center gap-2 p-2.5 bg-surface-2 rounded-xl hover:border-primary/40 border border-white/6 transition-all text-left group">
                 <div className="w-10 h-8 rounded-lg overflow-hidden bg-bg shrink-0">
                   {ch.poster_url

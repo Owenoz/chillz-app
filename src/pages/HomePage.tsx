@@ -1,23 +1,13 @@
 import { useNavigate } from 'react-router-dom'
 import { useState, useEffect, useCallback } from 'react'
 import { Play, ArrowRight, Television, SoccerBall, FilmSlate, Star, Clock } from '@phosphor-icons/react'
-import channels from '../data/tv_channels.json'
-import type { TvChannel, Fixture } from '../data/types'
+import type { Fixture } from '../data/types'
+import type { IptvChannel } from '../lib/iptvApi'
 import { fetchLiveFixtures } from '../lib/sportsApi'
 import staticFixtures from '../data/sports_fixtures.json'
 import { getContinueWatching, type ContinueItem } from '../lib/watchlist'
 
-const allChannels = channels as TvChannel[]
-const ugandaChannels = allChannels.filter(c => c.active && c.poster_url && c.country === 'Uganda')
-  .sort((a, b) => a.display_order - b.display_order)
-const popularChannels = [
-  ...ugandaChannels,
-  ...allChannels.filter(c => c.active && c.poster_url && c.country !== 'Uganda')
-    .sort((a, b) => a.display_order - b.display_order),
-].slice(0, 18)
-const heroSlides = ugandaChannels.slice(0, 6)
-
-// Trending movies (static posters for display)
+// ── Trending movie placeholders (static — real movies loaded on MoviesPage) ──
 const TRENDING = [
   { title: 'John Wick', year: 2023, rating: 7.4, genre: 'Action', poster: 'https://images.unsplash.com/photo-1626814026160-2237a95fc5a0?w=300&auto=format&fit=crop&q=80' },
   { title: 'The Batman', year: 2022, rating: 7.8, genre: 'Action', poster: 'https://images.unsplash.com/photo-1509347528160-9a9e33742cdb?w=300&auto=format&fit=crop&q=80' },
@@ -26,9 +16,9 @@ const TRENDING = [
 ]
 
 const TOP_LEAGUES = [
-  { name: 'Premier League', logo: 'https://crests.football-data.org/PL.png' },
-  { name: 'La Liga', logo: 'https://crests.football-data.org/PD.png' },
-  { name: 'Serie A', logo: 'https://crests.football-data.org/SA.png' },
+  { name: 'Premier League',   logo: 'https://crests.football-data.org/PL.png' },
+  { name: 'La Liga',          logo: 'https://crests.football-data.org/PD.png' },
+  { name: 'Serie A',          logo: 'https://crests.football-data.org/SA.png' },
   { name: 'Champions League', logo: 'https://crests.football-data.org/CL.png' },
 ]
 
@@ -38,33 +28,70 @@ function timeUntil(utcDate: string): string {
   const h = Math.floor(diff / 3600000)
   const m = Math.floor((diff % 3600000) / 60000)
   const s = Math.floor((diff % 60000) / 1000)
-  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (h > 0) return `${h}h ${m}m`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
 }
 
+// ── Load IPTV channels from sessionStorage (populated by TvPage) ──
+function loadIptvChannels(): IptvChannel[] {
+  try {
+    const raw = sessionStorage.getItem('chillz_iptv_channels_v3')
+    if (!raw) return []
+    const data = JSON.parse(raw) as { byCountry: Record<string, IptvChannel[]>; byCategory: Record<string, IptvChannel[]> }
+    // Priority: Uganda first, then Kenya, then others
+    const ugChannels = data.byCountry['ug'] || []
+    const keChannels = data.byCountry['ke'] || []
+    const others: IptvChannel[] = []
+    Object.entries(data.byCountry).forEach(([code, chs]) => {
+      if (code !== 'ug' && code !== 'ke') others.push(...chs)
+    })
+    return [...ugChannels, ...keChannels, ...others]
+  } catch {
+    return []
+  }
+}
+
 export default function HomePage() {
   const navigate = useNavigate()
-  const [heroIdx, setHeroIdx] = useState(0)
-  const [fixtures, setFixtures] = useState<Fixture[]>(staticFixtures as Fixture[])
-  const [tick, setTick] = useState(0)
+  const [heroIdx, setHeroIdx]       = useState(0)
+  const [fixtures, setFixtures]     = useState<Fixture[]>(staticFixtures as Fixture[])
+  const [tick, setTick]             = useState(0)
   const [continueList, setContinueList] = useState<ContinueItem[]>([])
+  const [iptvChannels, setIptvChannels] = useState<IptvChannel[]>([])
 
+  // Load continue watching
+  useEffect(() => { setContinueList(getContinueWatching()) }, [])
+
+  // Load IPTV channels from cache
   useEffect(() => {
-    setContinueList(getContinueWatching())
+    const loaded = loadIptvChannels()
+    setIptvChannels(loaded)
+    // If not cached yet, try again shortly (TvPage may be loading in background)
+    if (loaded.length === 0) {
+      const timer = setTimeout(() => setIptvChannels(loadIptvChannels()), 3000)
+      return () => clearTimeout(timer)
+    }
   }, [])
+
+  // Hero auto-advance
+  const heroSlides = iptvChannels
+    .filter(c => c.country_code === 'ug' && c.poster_url)
+    .slice(0, 6)
 
   useEffect(() => {
     if (heroSlides.length < 2) return
     const t = setInterval(() => setHeroIdx(i => (i + 1) % heroSlides.length), 5000)
     return () => clearInterval(t)
-  }, [])
+  }, [heroSlides.length])
 
+  // Countdown ticker
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000)
     return () => clearInterval(t)
   }, [])
 
+  // Fixtures
   const loadFixtures = useCallback(async () => {
     try {
       const data = await fetchLiveFixtures()
@@ -73,19 +100,28 @@ export default function HomePage() {
   }, [])
   useEffect(() => { loadFixtures() }, [loadFixtures])
 
+  void tick
+
   const hero = heroSlides[heroIdx] ?? heroSlides[0]
-  const liveFixtures = fixtures.filter(f => f.status === 'IN_PLAY' || f.status === 'PAUSED').slice(0, 4)
-  const upcomingFixtures = fixtures.filter(f => f.status === 'SCHEDULED' || f.status === 'TIMED')
-    .sort((a, b) => new Date(a.utc_date).getTime() - new Date(b.utc_date).getTime()).slice(0, 4)
+  const liveFixtures    = fixtures.filter(f => f.status === 'IN_PLAY' || f.status === 'PAUSED').slice(0, 4)
+  const upcomingFixtures = fixtures
+    .filter(f => f.status === 'SCHEDULED' || f.status === 'TIMED')
+    .sort((a, b) => new Date(a.utc_date).getTime() - new Date(b.utc_date).getTime())
+    .slice(0, 4)
   const matchesToShow = liveFixtures.length > 0 ? liveFixtures : upcomingFixtures
 
-  void tick
+  // Channels for the Live TV row (prioritize Uganda, then popular)
+  const ugandaChannels = iptvChannels.filter(c => c.country_code === 'ug' && c.poster_url)
+  const popularChannels = [
+    ...ugandaChannels,
+    ...iptvChannels.filter(c => c.country_code !== 'ug' && c.poster_url),
+  ].slice(0, 20)
 
   return (
     <div className="bg-mesh min-h-screen pb-6">
 
       {/* ══ HERO ══ */}
-      {hero && (
+      {hero ? (
         <div className="relative overflow-hidden" style={{ minHeight: 340, maxHeight: 460 }}>
           {heroSlides.map((slide, i) => (
             <div key={slide.id} className="absolute inset-0 transition-opacity duration-1000"
@@ -95,7 +131,6 @@ export default function HomePage() {
                 onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
             </div>
           ))}
-          {/* Multi-layer overlay */}
           <div className="absolute inset-0" style={{ background: 'linear-gradient(to right, rgba(10,10,15,0.96) 0%, rgba(10,10,15,0.7) 55%, rgba(10,10,15,0.3) 100%)' }} />
           <div className="absolute inset-0" style={{ background: 'linear-gradient(to top, #0A0A0F 0%, transparent 55%)' }} />
           <div className="absolute inset-0" style={{ background: 'radial-gradient(ellipse 60% 80% at 30% 50%, rgba(124,58,237,0.12), transparent 70%)' }} />
@@ -110,7 +145,8 @@ export default function HomePage() {
             </h1>
             <p className="text-sm text-muted mb-5 font-medium">Watch · Chill · Repeat</p>
             <div className="flex items-center gap-3">
-              <button onClick={() => navigate(`/tv/watch/${hero.id}`)} className="btn-primary flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white">
+              <button onClick={() => navigate(`/tv/watch/${encodeURIComponent(hero.id)}`, { state: hero })}
+                className="btn-primary flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white">
                 <Play weight="fill" size={14} /> Watch Now
               </button>
               <button onClick={() => navigate('/tv')}
@@ -118,15 +154,32 @@ export default function HomePage() {
                 All Channels
               </button>
             </div>
-
-            {/* Dot indicators */}
             <div className="flex items-center gap-1.5 mt-5">
               {heroSlides.map((_, i) => (
-                <button key={i} onClick={() => setHeroIdx(i)}
-                  className="rounded-full transition-all"
+                <button key={i} onClick={() => setHeroIdx(i)} className="rounded-full transition-all"
                   style={{ width: i === heroIdx ? 22 : 6, height: 6,
                     background: i === heroIdx ? '#7C3AED' : 'rgba(255,255,255,0.2)' }} />
               ))}
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* Fallback hero when IPTV not loaded yet */
+        <div className="relative overflow-hidden" style={{ minHeight: 340, maxHeight: 460 }}>
+          <div className="absolute inset-0" style={{ background: 'linear-gradient(135deg,rgba(124,58,237,0.3),rgba(10,10,15,1))' }} />
+          <div className="relative h-full flex flex-col justify-end px-5 pb-8 md:px-8" style={{ minHeight: 340 }}>
+            <p className="text-[10px] font-black tracking-[0.2em] text-primary-light uppercase mb-2 flex items-center gap-1.5">
+              <Television weight="fill" size={10} /> CHILLZ TV · LIVE
+            </p>
+            <h1 className="text-4xl md:text-6xl font-black text-white leading-none tracking-tight mb-1 max-w-lg">
+              DREAM<br /><span className="gradient-text">BIGGER</span>
+            </h1>
+            <p className="text-sm text-muted mb-5 font-medium">Watch · Chill · Repeat</p>
+            <div className="flex items-center gap-3">
+              <button onClick={() => navigate('/tv')}
+                className="btn-primary flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white">
+                <Play weight="fill" size={14} /> Browse Channels
+              </button>
             </div>
           </div>
         </div>
@@ -137,11 +190,8 @@ export default function HomePage() {
         {/* ══ CONTINUE WATCHING ══ */}
         {continueList.length > 0 && (
           <section>
-            <SectionHeader
-              title="Continue Watching"
-              icon={<Clock weight="duotone" size={14} className="text-primary-light" />}
-              onSeeAll={() => navigate('/watchlist')}
-            />
+            <SectionHeader title="Continue Watching" icon={<Clock weight="duotone" size={14} className="text-primary-light" />}
+              onSeeAll={() => navigate('/watchlist')} />
             <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar mt-4">
               {continueList.map(item => (
                 <button key={`${item.item_id}-${item.item_type}`}
@@ -181,38 +231,53 @@ export default function HomePage() {
 
         {/* ══ LIVE TV ROW ══ */}
         <section>
-          <SectionHeader title="Live TV" sub="TAP TO WATCH" icon={<Television weight="duotone" size={14} className="text-primary-light" />}
+          <SectionHeader title="Live TV" sub="TAP TO WATCH"
+            icon={<Television weight="duotone" size={14} className="text-primary-light" />}
             onSeeAll={() => navigate('/tv')} />
-          <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar mt-4">
-            {popularChannels.map(ch => (
-              <button key={ch.id} onClick={() => navigate(`/tv/watch/${ch.id}`)}
-                className="shrink-0 flex flex-col items-center gap-2 group">
-                <div className="w-16 h-16 rounded-2xl overflow-hidden border-2 border-border group-hover:border-primary/50 transition-all relative channel-glow"
-                  style={{ background: '#13111C' }}>
-                  {ch.poster_url ? (
-                    <img src={ch.poster_url} alt={ch.title} loading="lazy"
-                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
-                      onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center">
-                      <Television weight="duotone" size={24} className="text-primary-light opacity-60" />
+          {popularChannels.length > 0 ? (
+            <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar mt-4">
+              {popularChannels.map(ch => (
+                <button key={ch.id}
+                  onClick={() => navigate(`/tv/watch/${encodeURIComponent(ch.id)}`, { state: ch })}
+                  className="shrink-0 flex flex-col items-center gap-2 group">
+                  <div className="w-16 h-16 rounded-2xl overflow-hidden border-2 border-border group-hover:border-primary/50 transition-all relative"
+                    style={{ background: '#13111C' }}>
+                    {ch.poster_url ? (
+                      <img src={ch.poster_url} alt={ch.title} loading="lazy"
+                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+                        onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <Television weight="duotone" size={24} className="text-primary-light opacity-60" />
+                      </div>
+                    )}
+                    <div className="absolute bottom-0.5 left-0.5 bg-red-600 text-white text-[7px] font-black px-1 py-0.5 rounded-sm tracking-wider">
+                      LIVE
                     </div>
-                  )}
-                  <div className="absolute bottom-0.5 left-0.5 bg-red-600 text-white text-[7px] font-black px-1 py-0.5 rounded-sm tracking-wider">
-                    LIVE
                   </div>
+                  <span className="text-[10px] font-semibold text-muted group-hover:text-white transition-colors w-16 text-center truncate">
+                    {ch.title.replace(/ Uganda$/, '').replace(/ TV$/, '')}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            /* Skeleton while loading */
+            <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar mt-4">
+              {Array.from({length: 10}).map((_, i) => (
+                <div key={i} className="shrink-0 flex flex-col items-center gap-2">
+                  <div className="w-16 h-16 rounded-2xl skeleton"/>
+                  <div className="w-14 h-2 skeleton rounded"/>
                 </div>
-                <span className="text-[10px] font-semibold text-muted group-hover:text-white transition-colors w-16 text-center truncate">
-                  {ch.title.replace(/ Uganda$/, '').replace(/ TV$/, '')}
-                </span>
-              </button>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* ══ TRENDING MOVIES ══ */}
         <section>
-          <SectionHeader title="Trending Movies" icon={<FilmSlate weight="duotone" size={14} className="text-accent" />}
+          <SectionHeader title="Trending Movies"
+            icon={<FilmSlate weight="duotone" size={14} className="text-accent" />}
             onSeeAll={() => navigate('/movies')} />
           <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar mt-4">
             {TRENDING.map(m => (
@@ -245,10 +310,10 @@ export default function HomePage() {
         {matchesToShow.length > 0 && (
           <section>
             <SectionHeader
-              title={liveFixtures.length > 0 ? 'Live & upcoming matches' : 'Upcoming Matches'}
+              title={liveFixtures.length > 0 ? 'Live & Upcoming Matches' : 'Upcoming Matches'}
               sub="FOOTBALL"
               icon={<SoccerBall weight="duotone" size={14} className="text-emerald-400" />}
-              desc="Champions League, Premier League, LaLiga, Serie A & more"
+              desc="Premier League, La Liga, Serie A, Champions League & more"
               onSeeAll={() => navigate('/sports')}
             />
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
@@ -256,8 +321,6 @@ export default function HomePage() {
                 <MatchCard key={f.id} fixture={f} onClick={() => navigate(`/sports/fixture/${f.id}`)} />
               ))}
             </div>
-
-            {/* Top Leagues pills */}
             <div className="mt-5">
               <p className="text-[10px] font-black tracking-[0.15em] text-muted uppercase mb-3">Top Leagues</p>
               <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1">
@@ -266,9 +329,7 @@ export default function HomePage() {
                     className="shrink-0 flex items-center gap-2 px-3 py-2 rounded-xl bg-surface-2 border border-border hover:border-primary/40 transition-all group">
                     <img src={l.logo} alt={l.name} className="w-5 h-5 object-contain"
                       onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
-                    <span className="text-[11px] font-semibold text-muted group-hover:text-white transition-colors whitespace-nowrap">
-                      {l.name}
-                    </span>
+                    <span className="text-[11px] font-semibold text-muted group-hover:text-white transition-colors whitespace-nowrap">{l.name}</span>
                   </button>
                 ))}
               </div>
@@ -279,9 +340,9 @@ export default function HomePage() {
         {/* ══ QUICK ACCESS TILES ══ */}
         <div className="grid grid-cols-3 gap-3">
           {[
-            { label: 'Live TV', sub: `${allChannels.filter(c=>c.active).length}+ channels`, color: '#7C3AED', icon: <Television weight="fill" size={22} />, path: '/tv' },
-            { label: 'Sports', sub: 'Live fixtures', color: '#10B981', icon: <SoccerBall weight="fill" size={22} />, path: '/sports' },
-            { label: 'Movies', sub: '28k+ films', color: '#F59E0B', icon: <FilmSlate weight="fill" size={22} />, path: '/movies' },
+            { label: 'Live TV',  sub: `${iptvChannels.length > 0 ? iptvChannels.length.toLocaleString() + '+' : '1000+'} channels`, color: '#7C3AED', icon: <Television weight="fill" size={22} />, path: '/tv' },
+            { label: 'Sports',   sub: 'Live fixtures',   color: '#10B981', icon: <SoccerBall weight="fill" size={22} />, path: '/sports' },
+            { label: 'Movies',   sub: '28k+ films',      color: '#F59E0B', icon: <FilmSlate weight="fill" size={22} />, path: '/movies' },
           ].map(t => (
             <button key={t.label} onClick={() => navigate(t.path)}
               className="relative overflow-hidden rounded-2xl p-4 flex flex-col items-start gap-3 transition-all hover:-translate-y-0.5 group"
@@ -301,32 +362,41 @@ export default function HomePage() {
         </div>
 
         {/* ══ UGANDA CHANNELS GRID ══ */}
-        <section>
-          <SectionHeader title="🇺🇬 Uganda Channels" sub="LOCAL" onSeeAll={() => navigate('/tv')} />
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3 mt-4">
-            {ugandaChannels.slice(0, 12).map(ch => (
-              <button key={ch.id} onClick={() => navigate(`/tv/watch/${ch.id}`)}
-                className="group relative overflow-hidden rounded-2xl border border-border bg-surface hover:border-primary/40 transition-all hover:-translate-y-0.5 channel-glow">
-                <div className="aspect-video relative overflow-hidden">
-                  <img src={ch.poster_url!} alt={ch.title} loading="lazy"
-                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-400"
-                    onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                    <div className="w-8 h-8 rounded-full bg-primary shadow-glow-sm flex items-center justify-center">
-                      <Play weight="fill" size={12} className="text-white translate-x-0.5" />
+        {ugandaChannels.length > 0 && (
+          <section>
+            <SectionHeader title="🇺🇬 Uganda Channels" sub="LOCAL" onSeeAll={() => navigate('/tv')} />
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3 mt-4">
+              {ugandaChannels.slice(0, 12).map(ch => (
+                <button key={ch.id}
+                  onClick={() => navigate(`/tv/watch/${encodeURIComponent(ch.id)}`, { state: ch })}
+                  className="group relative overflow-hidden rounded-2xl border border-border bg-surface hover:border-primary/40 transition-all hover:-translate-y-0.5">
+                  <div className="aspect-video relative overflow-hidden">
+                    {ch.poster_url ? (
+                      <img src={ch.poster_url} alt={ch.title} loading="lazy"
+                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-400"
+                        onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-surface-2">
+                        <Television weight="duotone" size={20} className="text-primary-light opacity-40"/>
+                      </div>
+                    )}
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <div className="w-8 h-8 rounded-full bg-primary shadow-glow-sm flex items-center justify-center">
+                        <Play weight="fill" size={12} className="text-white translate-x-0.5" />
+                      </div>
+                    </div>
+                    <div className="absolute top-1 left-1 bg-red-600 text-white text-[7px] font-black px-1 py-0.5 rounded-sm flex items-center gap-0.5">
+                      <span className="w-1 h-1 bg-white rounded-full live-dot" /> LIVE
                     </div>
                   </div>
-                  <div className="absolute top-1 left-1 bg-red-600 text-white text-[7px] font-black px-1 py-0.5 rounded-sm flex items-center gap-0.5">
-                    <span className="w-1 h-1 bg-white rounded-full live-dot" /> LIVE
+                  <div className="p-2">
+                    <p className="text-[10px] font-bold text-white truncate">{ch.title}</p>
                   </div>
-                </div>
-                <div className="p-2">
-                  <p className="text-[10px] font-bold text-white truncate">{ch.title}</p>
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
 
       </div>
     </div>
@@ -350,7 +420,8 @@ function SectionHeader({ title, sub, icon, desc, onSeeAll }: {
         {desc && <p className="text-[11px] text-muted mt-0.5">{desc}</p>}
       </div>
       {onSeeAll && (
-        <button onClick={onSeeAll} className="flex items-center gap-1 text-[12px] font-semibold text-primary-light hover:text-white transition-colors whitespace-nowrap mt-1">
+        <button onClick={onSeeAll}
+          className="flex items-center gap-1 text-[12px] font-semibold text-primary-light hover:text-white transition-colors whitespace-nowrap mt-1">
           See all <ArrowRight size={12} />
         </button>
       )}
@@ -360,7 +431,7 @@ function SectionHeader({ title, sub, icon, desc, onSeeAll }: {
 
 /* ── Match Card ── */
 function MatchCard({ fixture: f, onClick }: { fixture: Fixture; onClick: () => void }) {
-  const isLive = f.status === 'IN_PLAY' || f.status === 'PAUSED'
+  const isLive     = f.status === 'IN_PLAY' || f.status === 'PAUSED'
   const isFinished = f.status === 'FINISHED'
   const date = new Date(f.utc_date)
   const today = date.toDateString() === new Date().toDateString()
@@ -375,12 +446,9 @@ function MatchCard({ fixture: f, onClick }: { fixture: Fixture; onClick: () => v
         border: `1px solid ${isLive ? 'rgba(239,68,68,0.25)' : 'rgba(45,38,69,0.8)'}`,
         boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
       }}>
-      {/* Background glow */}
       <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity"
         style={{ background: 'radial-gradient(ellipse at center, rgba(124,58,237,0.1), transparent 70%)' }} />
-
       <div className="relative p-3">
-        {/* Top: date + status */}
         <div className="flex items-center justify-between mb-3">
           <span className="text-[9px] font-bold text-muted">
             {today ? 'TODAY' : date.toLocaleDateString([], { month: 'short', day: 'numeric' })}
@@ -392,22 +460,17 @@ function MatchCard({ fixture: f, onClick }: { fixture: Fixture; onClick: () => v
             </span>
           )}
           {!isLive && !isFinished && (
-            <span className="text-[9px] text-emerald-400 font-semibold bg-emerald-400/10 px-1.5 py-0.5 rounded-md">
-              UPCOMING
-            </span>
+            <span className="text-[9px] text-emerald-400 font-semibold bg-emerald-400/10 px-1.5 py-0.5 rounded-md">SOON</span>
           )}
         </div>
-
-        {/* Teams */}
         <div className="flex items-center justify-between gap-2">
           <div className="flex flex-col items-center gap-1.5 flex-1">
             <img src={f.home_team_crest} alt="" className="w-10 h-10 object-contain drop-shadow-lg"
               onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
             <span className="text-[10px] font-bold text-white text-center line-clamp-1 w-full">
-              {f.home_team_name.split(' ').slice(0,2).join(' ')}
+              {f.home_team_name.split(' ').slice(0, 2).join(' ')}
             </span>
           </div>
-
           <div className="flex flex-col items-center gap-0.5 px-1">
             {isLive || isFinished ? (
               <span className={`text-lg font-black tabular-nums ${isLive ? 'text-red-400' : 'text-white'}`}>
@@ -418,20 +481,18 @@ function MatchCard({ fixture: f, onClick }: { fixture: Fixture; onClick: () => v
             )}
             {isFinished && <span className="text-[8px] text-muted font-bold">FT</span>}
           </div>
-
           <div className="flex flex-col items-center gap-1.5 flex-1">
             <img src={f.away_team_crest} alt="" className="w-10 h-10 object-contain drop-shadow-lg"
               onError={e => ((e.currentTarget as HTMLImageElement).style.display = 'none')} />
             <span className="text-[10px] font-bold text-white text-center line-clamp-1 w-full">
-              {f.away_team_name.split(' ').slice(0,2).join(' ')}
+              {f.away_team_name.split(' ').slice(0, 2).join(' ')}
             </span>
           </div>
         </div>
-
         <p className="text-[9px] text-muted font-semibold text-center mt-2 truncate">{f.competition_name}</p>
         {!isLive && !isFinished && (
           <p className="text-[9px] text-emerald-400 text-center mt-0.5">
-            🕐 Starts in {timeUntil(f.utc_date)}
+            🕐 {timeUntil(f.utc_date)}
           </p>
         )}
       </div>
