@@ -94,13 +94,26 @@ export default function RadioPage() {
       audioRef.current.src = ''
     }
 
-    const audio = new Audio(station.url)
-    audio.crossOrigin = 'anonymous'
+    const audio = new Audio()
+    // Don't set crossOrigin — many radio streams block CORS preflight requests
+    // The browser can still play them without crossOrigin attribute
     audioRef.current = audio
-    audio.addEventListener('playing', () => setPlaying(true), { once: false })
+
+    audio.addEventListener('playing', () => setPlaying(true))
     audio.addEventListener('waiting', () => setPlaying(false))
+    audio.addEventListener('stalled', () => setPlaying(false))
     audio.addEventListener('error', () => { setAudioErr(true); setPlaying(false) })
-    audio.play().catch(() => setAudioErr(true))
+    audio.addEventListener('canplay', () => setPlaying(true), { once: true })
+
+    audio.src = station.url
+    audio.preload = 'none'
+    audio.play().catch(() => {
+      // Some streams need a small delay
+      setTimeout(() => {
+        audio.load()
+        audio.play().catch(() => setAudioErr(true))
+      }, 500)
+    })
   }, [])
 
   const stopStation = useCallback(() => {
@@ -170,6 +183,11 @@ export default function RadioPage() {
           className="w-9 h-9 rounded-xl bg-surface-2 border border-border flex items-center justify-center text-muted hover:text-white transition-all shrink-0">
           <X weight="bold" size={16}/>
         </button>
+        {/* Open in browser as fallback */}
+        <a href={active.url} target="_blank" rel="noopener noreferrer" title="Open stream in browser"
+          className="w-9 h-9 rounded-xl bg-surface-2 border border-border flex items-center justify-center text-muted hover:text-white transition-all shrink-0 text-xs font-bold">
+          ↗
+        </a>
       </div>
     </div>
   ) : null

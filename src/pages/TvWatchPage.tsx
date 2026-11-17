@@ -7,16 +7,25 @@ import { saveContinueWatching } from '../lib/watchlist'
 
 // ── Helpers ───────────────────────────────────────────────────────
 function toYouTubeEmbed(raw: string): string {
+  // If it looks like a bare YouTube channel ID (24 chars starting with UC)
+  if (/^UC[\w-]{22}$/.test(raw.trim())) {
+    return `https://www.youtube-nocookie.com/embed/live_stream?channel=${raw.trim()}&autoplay=1&mute=0&rel=0`
+  }
   try {
     const u = new URL(raw.startsWith('http') ? raw : `https://${raw}`)
     let vid = ''
     if (u.hostname === 'youtu.be') vid = u.pathname.slice(1).split('?')[0]
     else if (u.pathname.startsWith('/watch')) vid = u.searchParams.get('v') || ''
     else if (/^\/(live|embed|shorts)\//.test(u.pathname)) vid = u.pathname.split('/')[2]
-    if (vid) return `https://www.youtube-nocookie.com/embed/${vid}?autoplay=1&mute=1&playsinline=1&rel=0`
+    // YouTube channel ID in URL
+    else if (u.pathname.includes('/channel/')) {
+      const chId = u.pathname.split('/channel/')[1]?.split('/')[0]
+      if (chId) return `https://www.youtube-nocookie.com/embed/live_stream?channel=${chId}&autoplay=1&mute=0&rel=0`
+    }
+    if (vid) return `https://www.youtube-nocookie.com/embed/${vid}?autoplay=1&mute=0&playsinline=1&rel=0`
   } catch { /* fall through */ }
   if (/^[a-zA-Z0-9_-]{11}$/.test(raw.trim()))
-    return `https://www.youtube-nocookie.com/embed/${raw.trim()}?autoplay=1&mute=1&playsinline=1&rel=0`
+    return `https://www.youtube-nocookie.com/embed/${raw.trim()}?autoplay=1&mute=0&playsinline=1&rel=0`
   return raw
 }
 
@@ -44,8 +53,10 @@ export default function TvWatchPage() {
   const url   = channel?.source_url ?? ''
   const type  = channel?.source_type ?? 'hls'
 
-  // Detect actual type from URL
-  const isYouTube = type === 'youtube' || url.includes('youtube') || url.includes('youtu.be')
+  // Detect actual type from URL or source_type field
+  const isYouTube = type === 'youtube' ||
+    /^UC[\w-]{22}$/.test(url.trim()) ||  // bare YouTube channel ID
+    url.includes('youtube') || url.includes('youtu.be') || url.includes('youtube-nocookie')
   const isEmbed   = type === 'iframe' && !isYouTube
   const isHls     = !isYouTube && !isEmbed
 
@@ -93,7 +104,15 @@ export default function TvWatchPage() {
     }
 
     if (Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, enableWorker: true, maxBufferLength: 30 })
+      const hls = new Hls({
+        lowLatencyMode: true,
+        enableWorker: true,
+        maxBufferLength: 30,
+        // Send proper browser headers so servers don't block the stream
+        xhrSetup: (xhr) => {
+          xhr.setRequestHeader('Referer', window.location.origin + '/')
+        },
+      })
       hls.loadSource(url)
       hls.attachMedia(video)
       hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); markReady() })
